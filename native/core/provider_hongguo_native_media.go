@@ -70,7 +70,8 @@ func selectHongguoAppMedia(model map[string]any, seriesID, videoID string) (prov
 		}
 		// v2 fix: 不再写死 novel.snssdk.com，留空 Referer，让 mediaRequestHeaders 智能兜底
 		// v3 fix: seriesID/videoID/source 留底，给 30min 签名过期时 refreshHongguoMediaURL 重拉
-		media := providerMedia{Referer: "https://hongguoduanju.com/", Duration: time.Duration(duration * float64(time.Second)), seriesID: seriesID, videoID: videoID, source: sourceHongguo}
+		// v9 fix: Referer 留空（curl 实测无 Referer = 206，写 hongguoduanju.com = 403 denied by Referer ACL）
+		media := providerMedia{Referer: "", Duration: time.Duration(duration * float64(time.Second)), seriesID: seriesID, videoID: videoID, source: sourceHongguo}
 		encryption := nestedMap(variant, "encrypt_info")
 		spade := mapString(encryption, "spade_a")
 		if spade != "" || encryption["encrypt"] == true || mapString(encryption, "encryption_method") == "cenc-aes-ctr" {
