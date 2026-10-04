@@ -33,10 +33,10 @@ func (downloader *Downloader) resolveHongguoAppMedia(ctx context.Context, videoI
 			return providerMedia{}, errors.New("红果 App 播放信息格式异常")
 		}
 	}
-	return selectHongguoAppMedia(model)
+	return selectHongguoAppMedia(model, videoID, videoID)
 }
 
-func selectHongguoAppMedia(model map[string]any) (providerMedia, error) {
+func selectHongguoAppMedia(model map[string]any, seriesID, videoID string) (providerMedia, error) {
 	variants := anyList(model["video_list"])
 	if rows, ok := model["video_list"].(map[string]any); ok && len(variants) == 0 {
 		keys := make([]string, 0, len(rows))
@@ -67,7 +67,8 @@ func selectHongguoAppMedia(model map[string]any) (providerMedia, error) {
 			continue
 		}
 		// v2 fix: 不再写死 novel.snssdk.com，留空 Referer，让 mediaRequestHeaders 智能兜底
-		media := providerMedia{Referer: "", Duration: time.Duration(duration * float64(time.Second))}
+		// v3 fix: seriesID/videoID/source 留底，给 30min 签名过期时 refreshHongguoMediaURL 重拉
+		media := providerMedia{Referer: "", Duration: time.Duration(duration * float64(time.Second)), seriesID: seriesID, videoID: videoID, source: sourceHongguo}
 		encryption := nestedMap(variant, "encrypt_info")
 		spade := mapString(encryption, "spade_a")
 		if spade != "" || encryption["encrypt"] == true || mapString(encryption, "encryption_method") == "cenc-aes-ctr" {

@@ -77,7 +77,8 @@ func (stream *nativeStreamServer) nativePrefetch(ctx context.Context, token, ent
 			if err != nil {
 				return false
 			}
-			request.Header.Set("Referer", session.referer)
+			// v3 fix: 走 mediaRequestHeaders 智能同源兑底，与 app_stream.go 行为一致
+			mediaRequestHeaders(request, session.referer)
 			if !playlist {
 				request.Header.Set("Range", fmt.Sprintf("bytes=0-%d", remaining-1))
 			}
@@ -212,7 +213,8 @@ func (stream *nativeStreamServer) nativeServePrefix(ctx context.Context, writer 
 		if err != nil || validator == "" {
 			return false
 		}
-		upstream.Header.Set("Referer", session.referer)
+		// v3 fix: 走 mediaRequestHeaders 智能同源兑底，与 app_stream.go 行为一致
+		mediaRequestHeaders(upstream, session.referer)
 		upstream.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", len(asset.data), end))
 		upstream.Header.Set("If-Range", validator)
 		response, err = stream.nativeRequest(upstream)

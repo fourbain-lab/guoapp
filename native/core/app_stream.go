@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -34,9 +35,12 @@ type nativeStreamSession struct {
 	assets      map[string]nativeStreamAsset
 	referer     string
 	key         []byte
-	ctx         context.Context
-	cancel      context.CancelFunc
-	lastUsed    time.Time
+	// v3 fix: 视频过期刷新依据，需要 seriesID/videoID 才能重新解析
+	seriesID string
+	videoID  string
+	ctx      context.Context
+	cancel   context.CancelFunc
+	lastUsed time.Time
 }
 
 type nativeStreamServer struct {
@@ -74,7 +78,8 @@ func (stream *nativeStreamServer) nativeOpen(media providerMedia) (string, strin
 	}
 	token := hex.EncodeToString(tokenBytes)
 	ctx, cancel := context.WithCancel(providerMediaContext(context.Background(), media.credentials))
-	session := &nativeStreamSession{assets: map[string]nativeStreamAsset{}, referer: media.Referer, key: media.HLSKey, ctx: ctx, cancel: cancel, lastUsed: time.Now(), credentials: media.credentials}
+	// v3 fix: 把 seriesID/videoID 搬到 session，给 URL 过期时 refresh
+	session := &nativeStreamSession{assets: map[string]nativeStreamAsset{}, referer: media.Referer, key: media.HLSKey, seriesID: media.seriesID, videoID: media.videoID, ctx: ctx, cancel: cancel, lastUsed: time.Now(), credentials: media.credentials}
 	stream.mu.Lock()
 	for id, old := range stream.sessions {
 		if time.Since(old.lastUsed) > 10*time.Minute {
@@ -284,6 +289,36 @@ func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, reques
 		}
 	}
 	response, err := stream.nativeRequest(upstream)
+	if err != nil {
+		http.Error(writer, "读取媒体失败，请重试", http.StatusBadGateway)
+		return
+	}
+	// v3 fix: 红果 CDN URL 30 min 签名过期返回 403/410。拿到 403/410 后用 seriesID/videoID 重拉。
+	if (response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusGone) &&
+		session.seriesID != "" && session.videoID != "" && stream.downloader != nil {
+		stream.downloader.recordDiagnostic(diagnosticEvent{Level: "info", Event: "media_refresh_triggered", Message: fmt.Sprintf("status=%d seriesID=%s videoID=%s old=%s", response.StatusCode, session.seriesID, session.videoID, asset.address)})
+		response.Body.Close()
+		response = nil
+		newURL, refreshErr := stream.downloader.refreshHongguoMediaURL(ctx, session.seriesID, session.videoID)
+		if refreshErr != nil {
+			stream.downloader.recordDiagnostic(diagnosticEvent{Level: "warning", Event: "media_refresh_failed", Message: refreshErr.Error()})
+		} else {
+			stream.downloader.recordDiagnostic(diagnosticEvent{Level: "info", Event: "media_refresh_ok", Message: fmt.Sprintf("newURL=%s sameAsOld=%t", newURL, newURL == asset.address)})
+		}
+		if refreshErr == nil && newURL != "" && newURL != asset.address {
+			asset.address = newURL
+			upstream, err = http.NewRequestWithContext(ctx, request.Method, asset.address, nil)
+			if err == nil {
+				mediaRequestHeaders(upstream, session.referer)
+				for _, name := range []string{"Range", "If-Range"} {
+					if value := request.Header.Get(name); value != "" {
+						upstream.Header.Set(name, value)
+					}
+				}
+				response, err = stream.nativeRequest(upstream)
+			}
+		}
+	}
 	if err != nil {
 		http.Error(writer, "读取媒体失败，请重试", http.StatusBadGateway)
 		return

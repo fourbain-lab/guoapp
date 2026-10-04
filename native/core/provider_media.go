@@ -18,7 +18,11 @@ type providerMedia struct {
 	HLSKey      []byte
 	CENCKey     []byte
 	Quality     int
-	Variants    []providerMedia
+	// v3 fix: 用于 URL 过期时重新解析（红果 30 min 签名过期）
+	seriesID string
+	videoID  string
+	source   string
+	Variants []providerMedia
 }
 
 func (d *Downloader) providerBaseURL(source string) string {

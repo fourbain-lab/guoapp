@@ -90,7 +90,8 @@ func (d *Downloader) resolveHongguoPlaybackAPI(ctx context.Context, seriesID, vi
 		}
 		quality, _ := strconv.Atoi(hongguoQualityNumber.FindString(option.Name))
 		// v2 fix: 不再写死 novel.snssdk.com，留空 Referer，让 mediaRequestHeaders 智能兜底
-		media := providerMedia{URL: mediaURL, Referer: "", CENCKey: key, Quality: quality}
+		// v3 fix: seriesID/videoID/source 留底，给 30min 签名过期时 refresh 重拉
+		media := providerMedia{URL: mediaURL, Referer: "", CENCKey: key, Quality: quality, seriesID: seriesID, videoID: videoID, source: sourceHongguo}
 		variants = append(variants, media)
 		if selected.URL == "" || quality > bestQuality {
 			selected = media

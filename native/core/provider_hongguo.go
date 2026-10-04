@@ -199,6 +199,9 @@ func (d *Downloader) resolveHongguoMedia(ctx context.Context, task Task) (provid
 		return providerMedia{}, fmt.Errorf("红果章节 ID 无效，请重新获取章节")
 	}
 	media, nativeErr := d.resolveHongguoAppMedia(ctx, videoID)
+	if nativeErr == nil && media.URL != "" {
+		media.seriesID, media.videoID, media.source = seriesID, videoID, sourceHongguo
+	}
 	if nativeErr == nil {
 		return media, nil
 	}
@@ -235,7 +238,8 @@ func (d *Downloader) resolveHongguoWebMedia(ctx context.Context, seriesID, video
 		return providerMedia{}, fmt.Errorf("红果该集未提供公开播放地址，可能需要登录或 App 授权；不会将试看集冒充该集下载")
 	}
 	duration, _ := strconv.ParseFloat(mapString(info, "duration"), 64)
-	media := providerMedia{URL: addresses[0], Referer: d.providerBaseURL(sourceHongguo) + "/", Duration: time.Duration(duration * float64(time.Second))}
+	// v3 fix: 保留 seriesID/videoID/source，给 URL 过期时 refresh 重拉
+	media := providerMedia{URL: addresses[0], Referer: d.providerBaseURL(sourceHongguo) + "/", Duration: time.Duration(duration * float64(time.Second)), seriesID: seriesID, videoID: videoID, source: sourceHongguo}
 	for _, address := range addresses {
 		variant := media
 		variant.URL, variant.Variants = address, nil
@@ -337,4 +341,26 @@ func anyList(v any) []any {
 		}
 	}
 	return nil
+}
+
+
+// refreshHongguoMediaURL v3 fix: 红果 CDN URL 30 min 签名过期，
+// 重新走 playback API 拿新 URL。复用 resolveHongguoPlaybackAPI。
+func (d *Downloader) refreshHongguoMediaURL(ctx context.Context, seriesID, videoID string) (string, error) {
+	if d != nil {
+		d.recordDiagnostic(diagnosticEvent{Level: "info", Event: "refresh_hongguo_media_url_enter", Message: fmt.Sprintf("seriesID=%s videoID=%s", seriesID, videoID)})
+	}
+	if seriesID == "" || videoID == "" {
+		return "", fmt.Errorf("红果刷新 URL 缺少剧集 ID")
+	}
+	refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	media, err := d.resolveHongguoPlaybackAPI(refreshCtx, seriesID, videoID)
+	if err != nil {
+		return "", err
+	}
+	if media.URL == "" {
+		return "", fmt.Errorf("红果刷新 URL 返回空地址")
+	}
+	return media.URL, nil
 }

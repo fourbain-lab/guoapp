@@ -296,3 +296,52 @@ func TestMediaRequestHeaders(t *testing.T) {
 		})
 	}
 }
+
+// TestMediaRequestHeadersRefreshRefererOverride v3 fix: URL 过期 refresh 后
+// session.referer="" 状态 + request URL 是新 CDN host，验证兜底逻辑生效。
+func TestMediaRequestHeadersRefreshRefererOverride(t *testing.T) {
+	cases := []struct {
+		name        string
+		referer     string // 通常 refresh 后 session.referer 是 ""
+		requestURL  string
+		wantReferer string
+		wantOrigin  string
+	}{
+		{
+			name:        "refresh 后空 referer，跨 CDN 兜底为新 host",
+			referer:     "",
+			requestURL:  "https://v11-hgweb.qznovelvod.com/917ddcb.../video.mp4",
+			wantReferer: "https://v11-hgweb.qznovelvod.com/",
+			wantOrigin:  "https://v11-hgweb.qznovelvod.com",
+		},
+		{
+			name:        "refresh 后空 referer，青空 CDN 同域兜底",
+			referer:     "",
+			requestURL:  "https://www.sorani.net/cdn/video.ts",
+			wantReferer: "https://www.sorani.net/",
+			wantOrigin:  "https://www.sorani.net",
+		},
+		{
+			name:        "refresh 后原 referer=hongguoduanju 但 CDN 已变 douyinvod，兜底新 host",
+			referer:     "https://hongguoduanju.com/player/123",
+			requestURL:  "https://douyinvod.com/xx/video.mp4?l=20261004201453BDE6F8A6065B68A5E326",
+			wantReferer: "https://douyinvod.com/",
+			wantOrigin:  "https://douyinvod.com",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest("GET", tc.requestURL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mediaRequestHeaders(req, tc.referer)
+			if got := req.Header.Get("Referer"); got != tc.wantReferer {
+				t.Errorf("Referer: got %q, want %q", got, tc.wantReferer)
+			}
+			if got := req.Header.Get("Origin"); got != tc.wantOrigin {
+				t.Errorf("Origin: got %q, want %q", got, tc.wantOrigin)
+			}
+		})
+	}
+}
