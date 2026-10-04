@@ -23,13 +23,36 @@ type huangguoPreviewSession struct {
 
 func mediaRequestHeaders(request *http.Request, referer string) {
 	request.Header.Set("User-Agent", userAgent)
-	request.Header.Set("Referer", referer)
 	request.Header.Set("Accept", "*/*")
 	request.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
 	request.Header.Set("Sec-Fetch-Mode", "cors")
 	request.Header.Set("Sec-Fetch-Dest", "empty")
-	if origin, err := url.Parse(referer); err == nil && origin.Host != "" {
-		request.Header.Set("Origin", origin.Scheme+"://"+origin.Host)
+
+	targetReferer := referer
+	if request.URL != nil && request.URL.Host != "" {
+		reqHost := request.URL.Host
+		scheme := request.URL.Scheme
+		if scheme == "" {
+			scheme = "https"
+		}
+
+		// 核心修正：如果原 Referer 与当前请求的 Host 不匹配（即跨域 CDN 请求），
+		// 自动伪装成同源请求，避免触发 CDN 的严格防盗链 (403)。
+		// 严格比较 Host（防子域误伤，如 a.com ⊂ b.a.com 用 Contains 会错误判定为同域）
+		sameOrigin := false
+		if parsedReferer, err := url.Parse(referer); err == nil && parsedReferer.Host != "" {
+			sameOrigin = strings.EqualFold(parsedReferer.Host, reqHost)
+		}
+		if referer == "" || !sameOrigin {
+			targetReferer = scheme + "://" + reqHost + "/"
+		}
+	}
+
+	if targetReferer != "" {
+		request.Header.Set("Referer", targetReferer)
+		if origin, err := url.Parse(targetReferer); err == nil && origin.Host != "" {
+			request.Header.Set("Origin", origin.Scheme+"://"+origin.Host)
+		}
 	}
 }
 
