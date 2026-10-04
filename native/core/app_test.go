@@ -170,3 +170,20 @@ func TestHongguoDetailAndPlayableQuality(t *testing.T) {
 		t.Fatalf("wrong playable quality: %v", err)
 	}
 }
+
+// v8 fix regression: gear_des_key 含 "bytevc2" 但 codec_type 是 h265_hvc1 时不能误过滤
+// 真实 API 返回的 1080p variant 经常出现 gear_des_key 链含 bytevc2 字面量
+func TestHongguoCodecFilterPreservesHevenWhenGearKeyMentionsBytevc2(t *testing.T) {
+	media, err := selectHongguoAppMedia(map[string]any{"video_list": []any{
+		map[string]any{"main_url": "https://media.example.test/low.mp4", "video_meta": map[string]any{"codec_type": "bytevc2", "definition": "360p"}},
+		map[string]any{"main_url": "https://media.example.test/mid.mp4", "video_meta": map[string]any{"codec_type": "bytevc2", "definition": "540p"}},
+		map[string]any{"main_url": "https://media.example.test/hd.mp4", "video_meta": map[string]any{"codec_type": "bytevc2", "definition": "720p"}},
+		map[string]any{"main_url": "https://media.example.test/hevc.mp4", "video_meta": map[string]any{"codec_type": "h265_hvc1", "definition": "1080p"}, "gear_des_key": "0:MP4|1:encrypt|2:bytevc2|4:1080p|5:normal|6:only_roi_vcube_improve_1|10000:105"},
+	}})
+	if err != nil {
+		t.Fatalf("should keep h265_hvc1 even when gear_des_key mentions bytevc2: %v", err)
+	}
+	if media.Quality != 1080 || !strings.HasSuffix(media.URL, "hevc.mp4") {
+		t.Fatalf("wrong playable quality: %v %s", media.Quality, media.URL)
+	}
+}
