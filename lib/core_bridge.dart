@@ -184,6 +184,7 @@ abstract class AppRepository {
   Future<PlaybackPlan> fallback(PlaybackPlan current);
   Future<void> cancelPlayback();
   Future<void> release(String session);
+  Future<List<String>> playbackProbe();
 }
 
 class NativeRepository extends AppRepository {
@@ -740,6 +741,18 @@ class NativeRepository extends AppRepository {
   @override
   Future<void> cancelPlayback() async {
     await _call({'action': 'cancelPlayback', 'sequence': ++_playbackSequence});
+  }
+
+  /// 读取原生代理最近记录的请求与响应，用于播放失败后定位原因。
+  Future<List<String>> playbackProbe() async {
+    try {
+      final result = await _call({'action': 'playbackProbe'});
+      return (result['entries'] as List? ?? [])
+          .map((entry) => entry.toString())
+          .toList();
+    } catch (_) {
+      return const [];
+    }
   }
 
   @override

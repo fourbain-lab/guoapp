@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +42,49 @@ type nativeStreamSession struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	lastUsed time.Time
+	inflight int
+	served   int
+}
+
+// served reports whether the session ever delivered media to the player.
+func (session *nativeStreamSession) servedCount() int {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.served
+}
+
+// inFlight reports whether the session is currently serving a response.
+func (session *nativeStreamSession) inFlight() bool {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.inflight > 0
+}
+
+// served reports whether the identified session ever delivered media.
+func (stream *nativeStreamServer) served(token string) bool {
+	if token == "" {
+		return false
+	}
+	stream.mu.Lock()
+	session := stream.sessions[token]
+	stream.mu.Unlock()
+	return session != nil && session.servedCount() > 0
+}
+
+// usedAt reports when the identified session last served a response.
+func (stream *nativeStreamServer) usedAt(token string) (time.Time, bool) {
+	if token == "" {
+		return time.Time{}, false
+	}
+	stream.mu.Lock()
+	session := stream.sessions[token]
+	stream.mu.Unlock()
+	if session == nil {
+		return time.Time{}, false
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.lastUsed, true
 }
 
 type nativeStreamServer struct {
@@ -49,6 +93,26 @@ type nativeStreamServer struct {
 	address    string
 	sessions   map[string]*nativeStreamSession
 	server     *http.Server
+	probeMu    sync.Mutex
+	probes     []string
+}
+
+// nativeProbe records what the player asked the local proxy for and what the
+// proxy answered, so a playback failure can be traced from the app log.
+func (stream *nativeStreamServer) nativeProbe(format string, args ...any) {
+	stream.probeMu.Lock()
+	defer stream.probeMu.Unlock()
+	stream.probes = append(stream.probes, fmt.Sprintf(format, args...))
+	if len(stream.probes) > 64 {
+		stream.probes = stream.probes[len(stream.probes)-64:]
+	}
+}
+
+// nativeProbeLog returns the recorded proxy exchanges.
+func (stream *nativeStreamServer) nativeProbeLog() []string {
+	stream.probeMu.Lock()
+	defer stream.probeMu.Unlock()
+	return append([]string(nil), stream.probes...)
 }
 
 func (stream *nativeStreamServer) nativeRequest(request *http.Request) (*http.Response, error) {
@@ -58,6 +122,31 @@ func (stream *nativeStreamServer) nativeRequest(request *http.Request) (*http.Re
 }
 
 var nativePlaylistURI = regexp.MustCompile(`URI="([^"]+)"`)
+
+func nativeHLSManifest(address string) bool {
+	parsed, err := url.Parse(address)
+	if err != nil {
+		return false
+	}
+	return strings.HasSuffix(strings.ToLower(parsed.Path), ".m3u8")
+}
+
+// nativeDefiniteMedia reports whether a content type already identifies media
+// that cannot be a playlist, so the body never needs to be sniffed first.
+func nativeDefiniteMedia(contentType string) bool {
+	value := strings.ToLower(strings.TrimSpace(contentType))
+	if semicolon := strings.IndexByte(value, ';'); semicolon >= 0 {
+		value = strings.TrimSpace(value[:semicolon])
+	}
+	if value == "" || value == "application/octet-stream" || strings.Contains(value, "mpegurl") {
+		return false
+	}
+	return strings.HasPrefix(value, "video/") ||
+		strings.HasPrefix(value, "audio/") ||
+		value == "application/mp4"
+}
+
+const nativeStreamMaxAge = 10 * time.Minute
 
 func newNativeStreamServer(d *Downloader) (*nativeStreamServer, error) {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -81,30 +170,19 @@ func (stream *nativeStreamServer) nativeOpen(media providerMedia) (string, strin
 	// v3 fix: 把 seriesID/videoID 搬到 session，给 URL 过期时 refresh
 	session := &nativeStreamSession{assets: map[string]nativeStreamAsset{}, referer: media.Referer, key: media.HLSKey, seriesID: media.seriesID, videoID: media.videoID, ctx: ctx, cancel: cancel, lastUsed: time.Now(), credentials: media.credentials}
 	stream.mu.Lock()
+	// 只按空闲时长回收。会话数量由 engine.playbacks 统一约束，并在那里调用
+	// nativeRelease；这里再按数量淘汰会踢掉正在观看、恰好两次分片请求之间
+	// 空闲的会话，播放器随后收到 410。
 	for id, old := range stream.sessions {
-		if time.Since(old.lastUsed) > 10*time.Minute {
+		if time.Since(old.lastUsed) > nativeStreamMaxAge && !old.inFlight() {
 			old.cancel()
 			delete(stream.sessions, id)
 		}
 	}
-	if len(stream.sessions) >= 8 {
-		oldest := ""
-		for id, old := range stream.sessions {
-			if oldest == "" || old.lastUsed.Before(stream.sessions[oldest].lastUsed) {
-				oldest = id
-			}
-		}
-		stream.sessions[oldest].cancel()
-		delete(stream.sessions, oldest)
-	}
 	stream.sessions[token] = session
 	stream.mu.Unlock()
 	entry := nativeStreamAsset{address: media.URL, contentType: "video/mp4"}
-	isHLS := media.Playlist != "" || len(media.HLSKey) > 0 || strings.Contains(strings.ToLower(media.URL), "m3u8") || strings.Contains(strings.ToLower(media.URL), "hls")
-	if isHLS {
-		entry.contentType = "application/vnd.apple.mpegurl"
-	}
-	if parsed, err := url.Parse(media.URL); err == nil && strings.HasSuffix(strings.ToLower(parsed.Path), ".m3u8") {
+	if media.Playlist != "" || len(media.HLSKey) > 0 || nativeHLSManifest(media.URL) {
 		entry.contentType = "application/vnd.apple.mpegurl"
 	}
 	if media.Playlist != "" {
@@ -219,6 +297,59 @@ func (stream *nativeStreamServer) nativeRewrite(token string, session *nativeStr
 	return strings.Join(output, "\n"), nil
 }
 
+// nativeRange 表示客户端请求的字节区间。suffix 为真时表示 "bytes=-N"（末尾 N 字节）。
+type nativeRange struct {
+	start  int64
+	end    int64
+	suffix bool
+	open   bool
+}
+
+// nativeParseRange 解析单区间 Range 头。不支持的写法返回 ok=false，交由原样转发。
+func nativeParseRange(value string) (nativeRange, bool) {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "bytes=") || strings.Contains(value, ",") {
+		return nativeRange{}, false
+	}
+	parts := strings.SplitN(strings.TrimPrefix(value, "bytes="), "-", 2)
+	if len(parts) != 2 {
+		return nativeRange{}, false
+	}
+	start, end := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	if start == "" {
+		if end == "" {
+			return nativeRange{}, false
+		}
+		size, err := strconv.ParseInt(end, 10, 64)
+		if err != nil || size <= 0 {
+			return nativeRange{}, false
+		}
+		return nativeRange{suffix: true, end: size}, true
+	}
+	from, err := strconv.ParseInt(start, 10, 64)
+	if err != nil || from < 0 {
+		return nativeRange{}, false
+	}
+	if end == "" {
+		return nativeRange{start: from, open: true}, true
+	}
+	to, err := strconv.ParseInt(end, 10, 64)
+	if err != nil || to < from {
+		return nativeRange{}, false
+	}
+	return nativeRange{start: from, end: to}, true
+}
+
+// nativeSkip 丢弃上游响应开头的 n 字节。上游忽略 Range 并返回完整内容时，
+// 代理必须自行跳过前缀，否则播放器拿到的是从 0 开始的错误偏移。
+func nativeSkip(reader io.Reader, n int64) error {
+	if n <= 0 {
+		return nil
+	}
+	_, err := io.CopyN(io.Discard, reader, n)
+	return err
+}
+
 func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet && request.Method != http.MethodHead {
 		writer.WriteHeader(http.StatusMethodNotAllowed)
@@ -236,9 +367,21 @@ func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, reques
 	}
 	stream.mu.Unlock()
 	if session == nil {
+		stream.nativeProbe("GET %s -> 410 会话不存在", parts[1])
 		http.Error(writer, "播放已结束", http.StatusGone)
 		return
 	}
+	stream.nativeProbe("GET %s range=%q", parts[1], request.Header.Get("Range"))
+	session.mu.Lock()
+	session.inflight++
+	session.served++
+	session.mu.Unlock()
+	defer func() {
+		session.mu.Lock()
+		session.inflight--
+		session.lastUsed = time.Now()
+		session.mu.Unlock()
+	}()
 	session.mu.Lock()
 	asset, found := session.assets[parts[1]]
 	session.mu.Unlock()
@@ -335,12 +478,60 @@ func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, reques
 	if response.Request != nil && response.Request.URL != nil {
 		finalURL = response.Request.URL
 	}
-	playlist := strings.Contains(asset.contentType, "mpegurl") || strings.Contains(contentType, "mpegurl") || strings.HasSuffix(strings.ToLower(finalURL.Path), ".m3u8") || strings.Contains(strings.ToLower(finalURL.String()), "m3u8") || len(session.key) > 0
+	// 上游可能忽略 Range 而返回 200 加完整内容（部分 CDN 如此）。此时必须由代理
+	// 兑现客户端的区间请求：跳过前缀、限制长度并补上正确的 206 头，否则播放器
+	// 会拿到从 0 开始的字节流，seek 之后解析错位并报 Source error。
+	wanted, wantRange := nativeParseRange(request.Header.Get("Range"))
+	rewriteRange := wantRange && response.StatusCode == http.StatusOK
+	rangeStart, rangeEnd := int64(0), int64(-1)
+	if rewriteRange {
+		total := response.ContentLength
+		if total < 0 {
+			rewriteRange = false
+		} else {
+			switch {
+			case wanted.suffix:
+				if wanted.end > total {
+					rangeStart = 0
+				} else {
+					rangeStart = total - wanted.end
+				}
+				rangeEnd = total - 1
+			case wanted.open:
+				rangeStart = wanted.start
+				rangeEnd = total - 1
+			default:
+				rangeStart = wanted.start
+				rangeEnd = min(wanted.end, total-1)
+			}
+			if rangeStart > rangeEnd || rangeStart >= total {
+				writer.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", total))
+				writer.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+		}
+	}
+	playlist := strings.Contains(asset.contentType, "mpegurl") || strings.Contains(contentType, "mpegurl") || nativeHLSManifest(finalURL.String()) || len(session.key) > 0
 	reader := bufio.NewReader(response.Body)
-	if !playlist && request.Method == http.MethodGet {
-		peek, _ := reader.Peek(512)
-		if strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(string(peek), "\ufeff")), "#EXTM3U") {
+	if playlist {
+		rewriteRange = false
+	}
+	if rewriteRange && request.Method == http.MethodGet {
+		if err := nativeSkip(reader, rangeStart); err != nil {
+			stream.nativeProbe("  -> 跳过前缀失败: %v", err)
+			http.Error(writer, "读取媒体失败，请重试", http.StatusBadGateway)
+			return
+		}
+	}
+	// 仅在类型不确定时才探测首字节。Peek 会一直阻塞到上游送出数据为止，而播放器
+	// 对响应头有连接超时（Media3 默认 8 秒）；上游稍慢就会让大文件开播失败。
+	if !playlist && request.Method == http.MethodGet && !nativeDefiniteMedia(contentType) {
+		peek, peekErr := reader.Peek(512)
+		prefix := strings.TrimSpace(strings.TrimPrefix(string(peek), "\ufeff"))
+		if strings.HasPrefix(prefix, "#EXTM3U") {
 			playlist = true
+		} else if peekErr == nil {
+			playlist = false
 		}
 	}
 	if playlist && request.Method == http.MethodHead {
@@ -373,8 +564,29 @@ func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, reques
 			writer.Header().Set(name, value)
 		}
 	}
-	writer.WriteHeader(response.StatusCode)
+	status := response.StatusCode
+	if rewriteRange {
+		status = http.StatusPartialContent
+		writer.Header().Set("Accept-Ranges", "bytes")
+		writer.Header().Set("Content-Length", strconv.FormatInt(rangeEnd-rangeStart+1, 10))
+		writer.Header().Set("Content-Range",
+			fmt.Sprintf("bytes %d-%d/%d", rangeStart, rangeEnd, response.ContentLength))
+	}
+	writer.WriteHeader(status)
+	// 立即把响应头送给播放器。否则头部会一直留在缓冲里，直到上游送出第一个
+	// 字节才发出；上游稍慢就会触发播放器 8 秒连接超时（Media3 默认值）。
+	if flusher, ok := writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
 	if request.Method == http.MethodGet {
-		_, _ = io.Copy(writer, reader)
+		source := io.Reader(reader)
+		if rewriteRange && rangeEnd >= rangeStart {
+			source = io.LimitReader(reader, rangeEnd-rangeStart+1)
+		}
+		written, copyErr := io.Copy(writer, source)
+		stream.nativeProbe("  -> %d bytes err=%v (upstream %d %q, range=%v)", written, copyErr,
+			response.StatusCode, response.Header.Get("Content-Type"), rewriteRange)
+	} else {
+		stream.nativeProbe("  -> %d (head)", response.StatusCode)
 	}
 }

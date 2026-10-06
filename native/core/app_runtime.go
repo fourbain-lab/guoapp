@@ -475,6 +475,11 @@ func nativeDispatch(input nativeInput) (any, error) {
 	case "cancelPlayback":
 		engine.nativeCancelPlayback(input.Sequence)
 		return true, nil
+	case "playbackProbe":
+		if engine.stream == nil {
+			return map[string]any{"entries": []string{}}, nil
+		}
+		return map[string]any{"entries": engine.stream.nativeProbeLog()}, nil
 	case "release":
 		engine.nativeReleasePlayback(input.Session)
 		return true, nil

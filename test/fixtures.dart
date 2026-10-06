@@ -112,5 +112,7 @@ class FixtureRepository extends AppRepository {
   @override
   Future<void> cancelPlayback() async {}
   @override
+  Future<List<String>> playbackProbe() async => const [];
+  @override
   Future<void> release(String session) async {}
 }

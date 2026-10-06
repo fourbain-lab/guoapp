@@ -445,4 +445,6 @@ class _LocalFileRepository extends AppRepository {
   Future<void> cancelPlayback() async {}
   @override
   Future<void> release(String session) async {}
+  @override
+  Future<List<String>> playbackProbe() async => const [];
 }

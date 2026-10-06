@@ -229,16 +229,45 @@ class MainActivity : FlutterActivity() {
             }
     }
 
+    @Volatile
+    private var pictureInPictureVerified = false
+
     private fun pictureInPictureSupported(): Boolean {
-        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-            packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
+        if (pictureInPictureVerified || isInPictureInPictureMode) return true
+        // 部分鸿蒙 / OEM 系统不声明 FEATURE_PICTURE_IN_PICTURE 但实际支持，
+        // 因此以真实进入结果为准，特性声明只作为初始提示。
+        return packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
     }
 
     private fun pictureInPictureStatus(): Map<String, Any> {
         return mapOf(
             "supported" to pictureInPictureSupported(),
+            "granted" to pictureInPicturePermissionGranted(),
             "active" to (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInPictureInPictureMode)
         )
+    }
+
+    private fun pictureInPicturePermissionGranted(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true
+        return runCatching {
+            val manager = getSystemService(Context.APP_OPS_SERVICE) as android.app.AppOpsManager
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                manager.unsafeCheckOpNoThrow(
+                    android.app.AppOpsManager.OPSTR_PICTURE_IN_PICTURE,
+                    android.os.Process.myUid(),
+                    packageName
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                manager.checkOpNoThrow(
+                    android.app.AppOpsManager.OPSTR_PICTURE_IN_PICTURE,
+                    android.os.Process.myUid(),
+                    packageName
+                )
+            }
+            mode != android.app.AppOpsManager.MODE_IGNORED && mode != android.app.AppOpsManager.MODE_ERRORED
+        }.getOrDefault(true)
     }
 
     private fun enterPlayerPictureInPicture(
@@ -249,7 +278,7 @@ class MainActivity : FlutterActivity() {
         right: Int?,
         bottom: Int?
     ): Map<String, Any> {
-        if (!pictureInPictureSupported()) return pictureInPictureStatus()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return pictureInPictureStatus()
         val safeWidth = width.coerceIn(1, 10000)
         val safeHeight = height.coerceIn(1, 10000)
         return runCatching {
@@ -263,6 +292,7 @@ class MainActivity : FlutterActivity() {
                 builder.setAutoEnterEnabled(true)
             }
             val entered = enterPictureInPictureMode(builder.build())
+            if (entered) pictureInPictureVerified = true
             pictureInPictureStatus() + ("requested" to entered)
         }.getOrElse { pictureInPictureStatus() }
     }
@@ -272,6 +302,7 @@ class MainActivity : FlutterActivity() {
         newConfig: Configuration
     ) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        if (isInPictureInPictureMode) pictureInPictureVerified = true
         deviceChannel?.invokeMethod(
             "pictureInPictureChanged",
             mapOf("active" to isInPictureInPictureMode)

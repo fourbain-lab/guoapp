@@ -86,9 +86,12 @@ class LunaPlayerStreams implements PlayerStream {
 /// 采用和 LunaTV-Mobile 完全相同架构的 ExoPlayer (AndroidX Media3) 播放器封装，
 /// 同时对上层红果鉴播控 UI (PlayerControls & TelevisionControls) 暴露完全兼容的 Player 契约。
 class LunaExoPlayer implements Player {
-  LunaExoPlayer() {
+  LunaExoPlayer({this.probeSource}) {
     state = const PlayerState().copyWith(volume: 100.0);
   }
+
+  /// 可选的原生代理探针读取器，用于播放失败后记录代理实际往返。
+  final Future<List<String>> Function()? probeSource;
 
   VideoPlayerController? _controller;
   VoidCallback? _valueListener;
@@ -148,6 +151,7 @@ class LunaExoPlayer implements Player {
         headers.addAll(Map<String, String>.from(media.httpHeaders!));
       }
     } catch (_) {}
+    headers.removeWhere((key, _) => key.toLowerCase() == 'accept-encoding');
 
     // 针对防盗链 CDN 注入标准移动端 UA
     if (!headers.keys.any((k) => k.toLowerCase() == 'user-agent')) {
@@ -155,9 +159,11 @@ class LunaExoPlayer implements Player {
           'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
     }
 
-    bool isHls = url.toLowerCase().contains('.m3u8') ||
-        url.toLowerCase().contains('hls') ||
-        (headers['accept']?.contains('mpegurl') ?? false);
+    final lowerUrl = url.toLowerCase();
+    final pathOnly = lowerUrl.split('?').first.split('#').first;
+    bool isHls = pathOnly.endsWith('.m3u8') ||
+        pathOnly.endsWith('.m3u') ||
+        (headers['accept']?.toLowerCase().contains('mpegurl') ?? false);
 
     final uri = Uri.tryParse(url);
     if (uri == null && !url.startsWith('/')) {
@@ -215,6 +221,11 @@ class LunaExoPlayer implements Player {
           '[ExoPlayer] c.initialize() 成功! duration=${c.value.duration}, size=${c.value.size}, isInitialized=${c.value.isInitialized}');
     } catch (e, stack) {
       DiaryService.add('[ExoPlayer] 首次 initialize 失败: $e');
+      DiaryService.add('[ExoPlayer] controller 状态: ${c.value.errorDescription ?? "无附加信息"}');
+      // 失败瞬间回查本机代理，记录播放器实际会看到的响应，便于定位是代理
+      // 返回了错误状态还是播放器自身解析失败。
+      await _probeProxy(uri, headers);
+      await _dumpNativeProbe();
       // 如果首次尝试失败，且为网络视频，则原地使用交替格式（HLS <-> MP4）自愈重试
       if (uri != null && (uri.scheme == 'http' || uri.scheme == 'https')) {
         final alternateFormat = formatHint == VideoFormat.hls ? null : VideoFormat.hls;
@@ -321,6 +332,61 @@ class LunaExoPlayer implements Player {
       } catch (_) {}
     }
     revision.value++;
+  }
+
+  /// 播放失败后回查本机代理：分别模拟播放器的无 Range 请求与开放 Range 请求，
+  /// 状态码异常时记录响应体（Go 侧错误信息），用于区分代理故障与解码故障。
+  Future<void> _probeProxy(Uri? uri, Map<String, String> headers) async {
+    if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) return;
+    for (final range in <String?>[null, 'bytes=0-']) {
+      try {
+        final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+        final request = await client.getUrl(uri);
+        headers.forEach((key, value) {
+          if (key.toLowerCase() != 'accept-encoding') {
+            request.headers.set(key, value);
+          }
+        });
+        if (range != null) request.headers.set('Range', range);
+        final response = await request.close().timeout(const Duration(seconds: 8));
+        final body = await response
+            .take(1)
+            .toList()
+            .timeout(const Duration(seconds: 5), onTimeout: () => []);
+        final head = body.isEmpty
+            ? ''
+            : String.fromCharCodes(
+                body.first.take(24),
+              ).replaceAll(RegExp(r'[\x00-\x1f]'), '.');
+        DiaryService.add(
+          '[Probe] range=${range ?? "无"} status=${response.statusCode} '
+          'type=${response.headers.contentType} '
+          'len=${response.headers.contentLength} '
+          'range=${response.headers.value("content-range")} head=$head',
+        );
+        client.close(force: true);
+      } catch (error) {
+        DiaryService.add('[Probe] range=${range ?? "无"} 回查失败: $error');
+      }
+    }
+  }
+
+  /// 记录原生代理侧最近的请求与响应，直接反映播放器拿到的字节数。
+  Future<void> _dumpNativeProbe() async {
+    final source = probeSource;
+    if (source == null) return;
+    try {
+      final entries = await source();
+      if (entries.isEmpty) {
+        DiaryService.add('[Probe] 原生代理无记录（播放器可能未发起请求）');
+        return;
+      }
+      for (final entry in entries) {
+        DiaryService.add('[Probe] $entry');
+      }
+    } catch (error) {
+      DiaryService.add('[Probe] 读取原生记录失败: $error');
+    }
   }
 
   void _startPositionPolling() {

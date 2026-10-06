@@ -92,6 +92,8 @@ class DeviceFixtureRepository extends AppRepository {
   @override
   Future<void> cancelPlayback() => native.cancelPlayback();
   @override
+  Future<List<String>> playbackProbe() => native.playbackProbe();
+  @override
   Future<void> release(String session) async {
     if (session.isNotEmpty) released.add(session);
     await native.release(session);

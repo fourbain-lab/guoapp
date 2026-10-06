@@ -182,15 +182,15 @@ class _PlayerScreenState extends State<PlayerScreen>
     widget.store.addListener(_accessChanged);
     _player =
         widget.playerFactory?.call() ??
-        (Platform.isAndroid
-            ? LunaExoPlayer()
-            : Player(
-                configuration: const PlayerConfiguration(
-                  bufferSize: 32 * 1024 * 1024,
-                  logLevel: MPVLogLevel.error,
-                ),
-              ));
-    _video = widget.videoBuilder == null && !Platform.isAndroid
+        Player(
+          configuration: const PlayerConfiguration(
+            bufferSize: 32 * 1024 * 1024,
+            logLevel: MPVLogLevel.error,
+          ),
+        );
+    // media_kit (libmpv) 是唯一能解密红果 CENC 内容的路径：video_player 插件
+    // 不提供 DRM 接口，ExoPlayer 拿到加密数据后既无法解密也不会报错，只会卡住。
+    _video = widget.videoBuilder == null
         ? VideoController(
             _player,
             configuration: VideoControllerConfiguration(
@@ -494,6 +494,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       );
       if (!mounted || _closed) return;
       final supported = status?['supported'] == true;
+      final granted = status?['granted'] != false;
       final active = status?['active'] == true;
       final requested = status?['requested'] == true;
       _setPictureInPictureStatus(
@@ -501,8 +502,10 @@ class _PlayerScreenState extends State<PlayerScreen>
         active: active,
         requested: requested && !active,
       );
-      if (!supported || (!active && !requested)) {
+      if (!supported && !active && !requested) {
         _notice('当前设备不支持画中画');
+      } else if (!granted && !active && !requested) {
+        _notice('系统已禁用画中画，请在 设置 > 应用 > 画中画 中允许');
       } else if (requested && !active) {
         _pictureInPictureExitTimer?.cancel();
         _pictureInPictureExitTimer = Timer(const Duration(seconds: 2), () {
@@ -1045,7 +1048,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         _plan = plan;
         installed = true;
         _acceptErrors = true;
-        DiaryService.add('[Play] 调用 _player.open: url=${plan.url}, headers=${plan.headers.keys.toList()}');
+        DiaryService.add(
+          '[Play] 调用 _player.open: url=${plan.url}, headers=${plan.headers.keys.toList()}, '
+          '密钥=${plan.decryptionKey.isEmpty ? "无" : "${plan.decryptionKey.length} 位"}, '
+          '线路=${plan.routeIndex + 1}/${plan.routeCount}, 本地=${plan.local}',
+        );
         await _player.open(
           Media(
             plan.url,

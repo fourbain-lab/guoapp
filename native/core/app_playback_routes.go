@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+const nativePlaybackLimit = 8
+
 type nativePlaybackChoice struct {
 	danmakuSeries string
 	danmakuVideo  string
@@ -108,15 +110,35 @@ func (engine *nativeEngine) nativeOpenPlayback(ctx context.Context, choice nativ
 			delete(engine.playbacks, token)
 		}
 	}
-	if len(engine.playbacks) >= 8 {
-		oldest := ""
+	if len(engine.playbacks) >= nativePlaybackLimit {
+		// 真正被读取过的会话就是正在观看的那一集，必须保留；预加载、重试等
+		// 推测性会话从未送出过数据，优先回收。播放器在两次分片请求之间是空闲的，
+		// 所以不能以「当前有无请求在途」作为判据。
+		victim := ""
+		var victimAt time.Time
 		for token, old := range engine.playbacks {
-			if oldest == "" || old.created.Before(engine.playbacks[oldest].created) {
-				oldest = token
+			if engine.stream.served(old.streamSession) {
+				continue
+			}
+			if victim == "" || old.created.Before(victimAt) {
+				victim, victimAt = token, old.created
 			}
 		}
-		expired = append(expired, engine.playbacks[oldest].streamSession)
-		delete(engine.playbacks, oldest)
+		if victim == "" {
+			// 全部会话都在使用中（例如多集同时播放）：回收最久未使用的非在用会话。
+			var oldestAt time.Time
+			for token, old := range engine.playbacks {
+				at := old.created
+				if used, ok := engine.stream.usedAt(old.streamSession); ok {
+					at = used
+				}
+				if victim == "" || at.Before(oldestAt) {
+					victim, oldestAt = token, at
+				}
+			}
+		}
+		expired = append(expired, engine.playbacks[victim].streamSession)
+		delete(engine.playbacks, victim)
 	}
 	engine.playbacks[plan.Session] = choice
 	stream := engine.stream
