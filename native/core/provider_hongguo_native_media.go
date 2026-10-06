@@ -61,7 +61,8 @@ func selectHongguoAppMedia(model map[string]any, seriesID, videoID string) (prov
 		codec := strings.ToLower(mapString(meta, "codec_type"))
 		// v8 fix: 只过滤 codec_type=="bytevc2"，不要再用 gear_des_key 含 bytevc2 判断
 		// 否则会误伤像 1080p h265_hvc1 这种 variant (gear_des_key 链里含 bytevc2 字面量)
-		if codec == "bytevc2" {
+		// v10 fix: bytevc1 也过滤 (MediaCodec 都不解)，作为 defense-in-depth 防 reorder 回归
+		if codec == "bytevc2" || codec == "bytevc1" {
 			continue
 		}
 		addresses := hongguoMediaAddresses(variant)

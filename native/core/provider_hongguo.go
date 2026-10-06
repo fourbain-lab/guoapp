@@ -198,18 +198,22 @@ func (d *Downloader) resolveHongguoMedia(ctx context.Context, task Task) (provid
 	if !hongguoNumericID.MatchString(videoID) || !hongguoNumericID.MatchString(seriesID) {
 		return providerMedia{}, fmt.Errorf("红果章节 ID 无效，请重新获取章节")
 	}
-	media, nativeErr := d.resolveHongguoAppMedia(ctx, videoID)
-	if nativeErr == nil && media.URL != "" {
-		media.seriesID, media.videoID, media.source = seriesID, videoID, sourceHongguo
-	}
-	if nativeErr == nil {
+	// v10 fix: 先 web 后 app。Android ExoPlayer (Media3) 用 MediaCodec 解码，
+	// App API 返回的 variant 全是字节私有 codec (bytevc1/bytevc2) 不能解。
+	// Web player 返回的是标准 h264 MP4，MediaCodec 100% 能解。
+	// 验证: ffprobe web main_url = h264 High profile level 31
+	media, pageErr := d.resolveHongguoWebMedia(ctx, seriesID, videoID)
+	if pageErr == nil {
 		return media, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return providerMedia{}, err
 	}
-	media, pageErr := d.resolveHongguoWebMedia(ctx, seriesID, videoID)
-	if pageErr == nil {
+	media, nativeErr := d.resolveHongguoAppMedia(ctx, videoID)
+	if nativeErr == nil && media.URL != "" {
+		media.seriesID, media.videoID, media.source = seriesID, videoID, sourceHongguo
+	}
+	if nativeErr == nil {
 		return media, nil
 	}
 	if err := ctx.Err(); err != nil {
