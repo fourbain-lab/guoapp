@@ -17,7 +17,14 @@ import (
 
 const hongguoAppBaseURL = "https://api5-normal-sinfonlineb.fqnovel.com"
 
-const hongguoAppUserAgent = "com.phoenix.read/73532 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
+// v11 fix (2026-10-07): UA 降版本（yt-dlp 警告的备选方案）
+//   旧 UA:  com.phoenix.read/73532 + Android 16 (最新)
+//   新 UA:  com.phoenix.read/70000 + Android 12 (老版本)
+//   原因:  红果服务端疑似对最新 UA 全吐 bytevc1/bytevc2（付费墙策略）
+//          老 UA 可能让服务端返回 h264 等可解码编码
+//   风险:  需实测服务端是否吐 h264；如果服务端鉴权老 UA，可能直接 403
+//   诊断:  /tmp/guoapp_v2/BYTEVC_DIAGNOSIS.md (web 前3集后4集起SSR 404 + 全剧 bytevc)
+const hongguoAppUserAgent = "com.phoenix.read/70000 (Linux; U; Android 12; zh_CN; PFZM10; Build/SP1A.210812.016; Cronet/TTNetVersion:04270129 2024-01-15 QuicVersion:5e92d3a0 2023-08-23)"
 
 type hongguoCatalogCursor struct {
 	Offset        int       `json:"offset"`

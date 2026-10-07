@@ -290,7 +290,7 @@ func TestProviderMediaCredentialsLimitOriginAndUseBackupAddresses(t *testing.T) 
 		"main_url": "invalid", "backup_url": base64.StdEncoding.EncodeToString([]byte(primary)), "backup_urls": []any{backup},
 		"video_meta": map[string]any{"codec_type": "h264", "definition": "720p"},
 	}}}
-	media, err := selectHongguoAppMedia(model)
+	media, err := selectHongguoAppMedia(model, "", "")
 	if err != nil || media.URL != primary || len(media.Variants) != 2 || media.Variants[1].URL != backup || media.Duration != 6*time.Second {
 		t.Fatalf("hongguo backup media fields were lost: %+v %v", media, err)
 	}

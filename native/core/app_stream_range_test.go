@@ -48,7 +48,7 @@ func TestNativeUpstreamIgnoringRangeStillHonoursOffsets(t *testing.T) {
 		w.Header().Set("Content-Length", strconv.Itoa(total))
 		w.WriteHeader(http.StatusOK)
 		if r.Method != http.MethodHead {
-			_, _ = io.Copy(w, &zz14Reader{total: total})
+			_, _ = io.Copy(w, &rangeProbeReader{total: total})
 		}
 	}))
 	defer upstream.Close()

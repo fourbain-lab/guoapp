@@ -22,7 +22,7 @@ func TestHongguoBackupAddressesAndCodecAlternatives(t *testing.T) {
 		},
 		map[string]any{"main_url": "https://media.test/low.mp4", "video_meta": map[string]any{"codec_type": "h264", "definition": "720p"}},
 		map[string]any{"main_url": "https://media.test/unsupported.mp4", "backup_url": "https://backup.test/unsupported.mp4", "video_meta": map[string]any{"codec_type": "bytevc2", "definition": "2160p"}},
-	}})
+	}}, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,6 +34,8 @@ func TestHongguoBackupAddressesAndCodecAlternatives(t *testing.T) {
 	want := []string{
 		"https://media.test/main.mp4?token=a%2Fb", "https://backup.test/main.mp4?token=unchanged",
 		"https://third.test/main.mp4", "https://media.test/hevc.mp4", "https://media.test/low.mp4",
+		// v11: bytevc 降权为 last-resort，不再 ban；保留到 Variants 末尾
+		"https://media.test/unsupported.mp4", "https://backup.test/unsupported.mp4",
 	}
 	if !reflect.DeepEqual(addresses, want) || !reflect.DeepEqual(choices.qualities, []int{1080, 720}) {
 		t.Fatalf("wrong fallback order: %+v; qualities=%v", addresses, choices.qualities)

@@ -62,9 +62,12 @@ func selectHongguoAppMedia(model map[string]any, seriesID, videoID string) (prov
 		// v8 fix: 只过滤 codec_type=="bytevc2"，不要再用 gear_des_key 含 bytevc2 判断
 		// 否则会误伤像 1080p h265_hvc1 这种 variant (gear_des_key 链里含 bytevc2 字面量)
 		// v10 fix: bytevc1 也过滤 (MediaCodec 都不解)，作为 defense-in-depth 防 reorder 回归
-		if codec == "bytevc2" || codec == "bytevc1" {
-			continue
-		}
+		// v11 fix (2026-10-07): 仿 yt-dlp #9575 — bytevc 不直接 ban，降权到 -10000
+		//   原因：fork 部署在 Intel Mac 上无安卓 codec，但 fork 也跑在用户手机/树莓派等 Android 端
+		//   用户设备上的 MediaCodec 也许能解（部分版本 bytevc1 = h265 重编码），降权保留最后尝试
+		//   h264 score = height*10 + 1 (max ~1921) → bytevc score -= 10000 保证永远垫底
+		//   关键诊断文件：/tmp/guoapp_v2/BYTEVC_DIAGNOSIS.md (双剧8集实测，web 前3集后4集起SSR 404)
+		isBytevc := codec == "bytevc2" || codec == "bytevc1"
 		addresses := hongguoMediaAddresses(variant)
 		if len(addresses) == 0 {
 			continue
@@ -94,6 +97,13 @@ func selectHongguoAppMedia(model map[string]any, seriesID, videoID string) (prov
 		if codec == "h264" || codec == "avc1" {
 			quality++
 		}
+		// v11 fix: bytevc 降权（h264 最高 ~43201 8K, bytevc 仅作 last-resort）
+		//   Quality=0 让 nativePlaybackChoices 重新按 Quality 排序时 bytevc 也排最后
+		//   score 也降权 -100000 让 selectHongguoAppMedia 内部选择 score 最高时也排最后
+		if isBytevc {
+			media.Quality = 0
+			quality -= 100000
+		}
 		for _, address := range addresses {
 			media.URL = address
 			choices = append(choices, scoredMedia{media: media, score: quality})
@@ -110,7 +120,7 @@ func selectHongguoAppMedia(model map[string]any, seriesID, videoID string) (prov
 	if keyErr != nil {
 		return providerMedia{}, fmt.Errorf("红果 App 媒体密钥不可用: %w", keyErr)
 	}
-	return providerMedia{}, errors.New("红果 App 未返回兼容的媒体，已跳过不支持的编码")
+	return providerMedia{}, errors.New("红果 App 仅返回 bytevc1/bytevc2 (fork 不解码)，请等待服务端恢复或装正版 App")
 }
 
 func hongguoMediaAddresses(info map[string]any) []string {
