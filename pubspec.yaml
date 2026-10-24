@@ -11,6 +11,7 @@ dependencies:
     sdk: flutter
   flutter_localizations:
     sdk: flutter
+  video_player: ^2.9.2
   ffi: ^2.2.0
   media_kit: 1.2.6
   media_kit_video: 2.0.1
