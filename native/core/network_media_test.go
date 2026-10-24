@@ -45,8 +45,11 @@ func TestHuangguoMediaUsesBrowserSessionPageRefererAndPreviewToken(t *testing.T)
 			io.WriteString(w, `{"ok":true,"token":"local-fixture-token","expires_in":300}`)
 		case "/api/hls_key/test":
 			keys.Add(1)
-			if r.Header.Get("X-Preview-Token") != "local-fixture-token" || r.Header.Get("Origin") != "https://"+r.Host {
-				t.Error("key lost its token or Origin")
+			if r.Header.Get("X-Preview-Token") != "local-fixture-token" {
+				t.Error("key lost its token")
+			}
+			if got := r.Header.Get("Origin"); got != "" {
+				t.Errorf("V4A 已删除 Origin 注入，不应出现: got %q", got)
 			}
 			io.WriteString(w, "0123456789abcdef")
 		case "/segment.ts":
@@ -158,8 +161,8 @@ func TestLegacyPlaybackAndDownloadUseAuthenticatedPlaylistAndSourceKey(t *testin
 			return sourceFixtureResponse(request, 200, "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"/api/app/vid/sec\"\n#EXTINF:4,\nsegment.ts\n#EXT-X-ENDLIST\n"), nil
 		case "/api/app/vid/sec":
 			keys.Add(1)
-			if request.Header.Get("Origin") != legacyFrontendURL || request.Header.Get("Referer") != legacyFrontendURL+"/" {
-				t.Error("legacy key lost source headers")
+		if request.Header.Get("Origin") != "" || request.Header.Get("Referer") != legacyFrontendURL+"/" {
+				t.Error("legacy key must not carry Origin (V4A removed injection) or lost its source Referer")
 			}
 			return sourceFixtureResponse(request, 200, "0123456789abcdef"), nil
 		case "/api/app/vid/h5/m3u8/segment.ts":
@@ -219,64 +222,58 @@ func TestVideoEpisodeParsingPrefersNumberedLinksOverStartButton(t *testing.T) {
 	}
 }
 
-// TestMediaRequestHeaders 覆盖红果跨域 CDN 场景（防 403 防盗链）
-// v2 fix 核心逻辑：referer 与 request URL host 不一致时自动智能兑底为同源
+// TestMediaRequestHeaders 锁定 V4A 行为：只透传 caller 给的 referer，不注入 Origin、不做跨域兑底。
+// v4a 依据（commit 814a9e2）：curl 测试 #4 实证 CDN 拒同源 Referer/Origin（403），
+// curl 测试 #2 实证 https://hongguoduanju.com/ 返回 200，故 v2/v3 的"智能兑底"与 Origin 注入已删除。
+// 本测试的职责从"验证兑底逻辑"改为"防止兑底逻辑回归"。
 func TestMediaRequestHeaders(t *testing.T) {
 	cases := []struct {
-		name             string
-		referer          string
-		requestURL       string
-		wantReferer      string
-		wantOrigin       string
+		name        string
+		referer     string
+		requestURL  string
+		wantReferer string
 	}{
 		{
-			name:        "同源保留原 referer",
+			name:        "同源 referer 原样透传",
 			referer:     "https://hongguoduanju.com/player/123",
 			requestURL:  "https://hongguoduanju.com/video.mp4",
 			wantReferer: "https://hongguoduanju.com/player/123",
-			wantOrigin:  "https://hongguoduanju.com",
 		},
 		{
-			name:        "空 referer 兑底为 request URL host",
+			name:        "空 referer 保持为空（不兑底）",
 			referer:     "",
 			requestURL:  "https://douyinvod.com/xx/video.mp4",
-			wantReferer: "https://douyinvod.com/",
-			wantOrigin:  "https://douyinvod.com",
+			wantReferer: "",
 		},
 		{
-			name:        "跨域 referer 兑底为 request URL host（红果主场景）",
+			name:        "跨域 referer 原样透传（红果主场景，不改为 CDN host）",
 			referer:     "https://novel.snssdk.com/",
 			requestURL:  "https://douyinvod.com/xx/video.mp4",
-			wantReferer: "https://douyinvod.com/",
-			wantOrigin:  "https://douyinvod.com",
+			wantReferer: "https://novel.snssdk.com/",
 		},
 		{
-			name:        "子域陷阱：a.com 与 b.a.com 不判为同域（防 strings.Contains 误伤）",
+			name:        "子域不判为同域也无需处理（不做兑底）",
 			referer:     "https://b.a.com/page",
 			requestURL:  "https://a.com/video.mp4",
-			wantReferer: "https://a.com/",
-			wantOrigin:  "https://a.com",
+			wantReferer: "https://b.a.com/page",
 		},
 		{
-			name:        "大小写不敏感同源（EqualFold）",
+			name:        "大小写不同的 referer 原样透传",
 			referer:     "https://HongGuoDuanJu.com/page",
 			requestURL:  "https://hongguoduanju.com/video.mp4",
 			wantReferer: "https://HongGuoDuanJu.com/page",
-			wantOrigin:  "https://HongGuoDuanJu.com",
 		},
 		{
-			name:        "Referer 末尾带 path 保持原样（Origin 只取 host）",
+			name:        "Referer 末尾带 path 保持原样",
 			referer:     "https://www.sorani.net/play/123",
 			requestURL:  "https://www.sorani.net/cdn/video.mp4",
 			wantReferer: "https://www.sorani.net/play/123",
-			wantOrigin:  "https://www.sorani.net",
 		},
 		{
-			name:        "Referer 是 base64/乱码 解析失败时兑底",
+			name:        "非法 referer 也原样透传（由上游裁决）",
 			referer:     "not-a-valid-url",
 			requestURL:  "https://cdn.example.com/video.mp4",
-			wantReferer: "https://cdn.example.com/",
-			wantOrigin:  "https://cdn.example.com",
+			wantReferer: "not-a-valid-url",
 		},
 	}
 
@@ -290,8 +287,8 @@ func TestMediaRequestHeaders(t *testing.T) {
 			if got := req.Header.Get("Referer"); got != tc.wantReferer {
 				t.Errorf("Referer: got %q, want %q", got, tc.wantReferer)
 			}
-			if got := req.Header.Get("Origin"); got != tc.wantOrigin {
-				t.Errorf("Origin: got %q, want %q", got, tc.wantOrigin)
+			if got := req.Header.Get("Origin"); got != "" {
+				t.Errorf("Origin 注入已删除，不应出现: got %q", got)
 			}
 		})
 	}
@@ -299,34 +296,34 @@ func TestMediaRequestHeaders(t *testing.T) {
 
 // TestMediaRequestHeadersRefreshRefererOverride v3 fix: URL 过期 refresh 后
 // session.referer="" 状态 + request URL 是新 CDN host，验证兜底逻辑生效。
+// TestMediaRequestHeadersRefreshRefererOverride 锁定 V4A 行为：URL 过期刷新后 referer 仍原样透传，
+// 不再因 CDN host 变化而"兑底"成 CDN host，也不再注入 Origin。
+// v4a 依据（commit 814a9e2）：同源 Referer/Origin 会被 CDN 拒（curl #4 403），
+// 业务域 https://hongguoduanju.com/ 才是有效 Referer（curl #2 200）。
 func TestMediaRequestHeadersRefreshRefererOverride(t *testing.T) {
 	cases := []struct {
 		name        string
-		referer     string // 通常 refresh 后 session.referer 是 ""
+		referer     string // refresh 后 session.referer 通常为空
 		requestURL  string
 		wantReferer string
-		wantOrigin  string
 	}{
 		{
-			name:        "refresh 后空 referer，跨 CDN 兜底为新 host",
+			name:        "refresh 后空 referer，跨 CDN 也保持为空（不兑底）",
 			referer:     "",
 			requestURL:  "https://v11-hgweb.qznovelvod.com/917ddcb.../video.mp4",
-			wantReferer: "https://v11-hgweb.qznovelvod.com/",
-			wantOrigin:  "https://v11-hgweb.qznovelvod.com",
+			wantReferer: "",
 		},
 		{
-			name:        "refresh 后空 referer，青空 CDN 同域兜底",
+			name:        "refresh 后空 referer，青空 CDN 也保持为空（不兑底）",
 			referer:     "",
 			requestURL:  "https://www.sorani.net/cdn/video.ts",
-			wantReferer: "https://www.sorani.net/",
-			wantOrigin:  "https://www.sorani.net",
+			wantReferer: "",
 		},
 		{
-			name:        "refresh 后原 referer=hongguoduanju 但 CDN 已变 douyinvod，兜底新 host",
+			name:        "refresh 后 referer 仍是业务域，CDN 已变 douyinvod 也不改",
 			referer:     "https://hongguoduanju.com/player/123",
 			requestURL:  "https://douyinvod.com/xx/video.mp4?l=20261004201453BDE6F8A6065B68A5E326",
-			wantReferer: "https://douyinvod.com/",
-			wantOrigin:  "https://douyinvod.com",
+			wantReferer: "https://hongguoduanju.com/player/123",
 		},
 	}
 	for _, tc := range cases {
@@ -339,8 +336,8 @@ func TestMediaRequestHeadersRefreshRefererOverride(t *testing.T) {
 			if got := req.Header.Get("Referer"); got != tc.wantReferer {
 				t.Errorf("Referer: got %q, want %q", got, tc.wantReferer)
 			}
-			if got := req.Header.Get("Origin"); got != tc.wantOrigin {
-				t.Errorf("Origin: got %q, want %q", got, tc.wantOrigin)
+			if got := req.Header.Get("Origin"); got != "" {
+				t.Errorf("Origin 注入已删除，不应出现: got %q", got)
 			}
 		})
 	}

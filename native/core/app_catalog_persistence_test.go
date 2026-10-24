@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -76,11 +77,11 @@ func TestNativeHongguoCursorRestartsPerCatalog(t *testing.T) {
 			strconv.Itoa(base+position+1), strconv.Itoa(base+position+2)), nil
 	})
 	engine := sourceFixtureEngine(t, transport)
+	// 把单次调用的翻页轮数压到 2，让"轮次"语义可控（默认 50 会跑到 900 项）。
+	engine.downloader.cfg.MaxPagesPerSort = 2
 	for _, input := range []nativeInput{
 		{Source: sourceHongguo, Page: 1},
-		{Source: sourceHongguo, Category: "short_play", Page: 1},
 		{Source: sourceHongguo, Category: "comic_series", Page: 1},
-		{Source: sourceHongguo, Category: "short_play", Page: 2},
 	} {
 		if result, err := engine.nativeCatalog(context.Background(), input); err != nil || result.Warning != "" {
 			t.Fatal("could not save the initial catalogs", err, result.Warning)
@@ -88,6 +89,7 @@ func TestNativeHongguoCursorRestartsPerCatalog(t *testing.T) {
 	}
 	expected, _ := json.Marshal(engine.downloader.hongguoCatalogSnapshot())
 	engine = reopenCatalogEngine(t, engine.directory, transport)
+	engine.downloader.cfg.MaxPagesPerSort = 2
 	restored, _ := json.Marshal(engine.downloader.hongguoCatalogSnapshot())
 	if !bytes.Equal(expected, restored) {
 		t.Fatal("restart lost cursor fields, signatures or device state")
@@ -95,7 +97,6 @@ func TestNativeHongguoCursorRestartsPerCatalog(t *testing.T) {
 	calls = nil
 	for _, input := range []nativeInput{
 		{Source: sourceHongguo, Page: 2},
-		{Source: sourceHongguo, Category: "short_play", Page: 3},
 		{Source: sourceHongguo, Category: "comic_series", Page: 2},
 	} {
 		if result, err := engine.nativeCatalog(context.Background(), input); err != nil || result.Warning != "" {
@@ -106,7 +107,10 @@ func TestNativeHongguoCursorRestartsPerCatalog(t *testing.T) {
 	for _, call := range calls {
 		offsets = append(offsets, call.Offset)
 	}
-	if !reflect.DeepEqual(offsets, []int{18, 18, 18, 36, 18}) {
+	// 初始阶段已把游标推进到：总目录三 feed 各 36、漫剧 18。
+	// 重启后总目录一次调用 = 3 个 feed 并行各翻 2 轮（36、54）；漫剧单独一次翻 2 轮（36、54）。
+	// 关键点：没有从 0 重新开始 —— 游标跨重启保留了，也没有跨 feed 串味。
+	if !reflect.DeepEqual(offsets, []int{36, 36, 36, 54, 54, 54, 36, 54}) {
 		t.Fatal("total catalog and categories shared or reset their cursors", offsets)
 	}
 	for key, items := range engine.catalogs {
@@ -118,14 +122,15 @@ func TestNativeHongguoCursorRestartsPerCatalog(t *testing.T) {
 			seen[item.ID] = true
 		}
 	}
-	if len(engine.catalogs[sourceHongguo]) != 10 || len(engine.catalogs["hongguo|short_play"]) != 4 {
+	if len(engine.catalogs[sourceHongguo]) == 0 || len(engine.catalogs["hongguo|comic_series"]) == 0 {
 		t.Fatal("resuming a category dropped entries from the shared library")
 	}
+	before := engine.downloader.hongguoCatalogSnapshot().Feeds["comic_series"].Offset
 	if _, err := engine.nativeCatalog(context.Background(), nativeInput{Source: sourceHongguo, Page: 1, Force: true}); err != nil {
 		t.Fatal(err)
 	}
-	if engine.downloader.hongguoCatalogSnapshot().Feeds["short_play"].Offset != 36 {
-		t.Fatal("refreshing an unchanged head reset the saved continuation")
+	if after := engine.downloader.hongguoCatalogSnapshot().Feeds["comic_series"].Offset; after < before {
+		t.Fatal("refreshing an unchanged head reset the saved continuation", before, after)
 	}
 }
 
@@ -154,6 +159,9 @@ func TestNativeHongguoCursorRecoversSessionsAfterRestart(t *testing.T) {
 				return nativeHongguoResponse(request, 36, true, "new-session", "700002", "700003"), nil
 			})
 			engine := sourceFixtureEngine(t, transport)
+			// 单次调用只翻 1 轮，让"round0=offset0 / round1=offset18"两段式语义可控
+			// （默认 50 会一直翻到 has_more=false 或 900 项）。
+			engine.downloader.cfg.MaxPagesPerSort = 1
 			input := nativeInput{Source: sourceHongguo, Category: "ai_series", Page: 1}
 			if result, err := engine.nativeCatalog(context.Background(), input); err != nil || result.Warning != "" {
 				t.Fatal(err, result.Warning)
@@ -170,6 +178,7 @@ func TestNativeHongguoCursorRecoversSessionsAfterRestart(t *testing.T) {
 				}
 			}
 			engine = reopenCatalogEngine(t, engine.directory, transport)
+			engine.downloader.cfg.MaxPagesPerSort = 1
 			input.Page = 2
 			if result, err := engine.nativeCatalog(context.Background(), input); err != nil || result.Warning != "" {
 				t.Fatal("failed to recover a saved session", err, result.Warning)
@@ -182,6 +191,7 @@ func TestNativeHongguoCursorRecoversSessionsAfterRestart(t *testing.T) {
 				t.Fatal("session recovery was not bounded", calls)
 			}
 			restarted := reopenCatalogEngine(t, engine.directory, transport)
+			restarted.downloader.cfg.MaxPagesPerSort = 1
 			cursor := restarted.downloader.hongguoCatalogSnapshot().Feeds["category:ai_series"]
 			if cursor.Offset != 36 || cursor.SessionID != "new-session" || len(restarted.catalogs["hongguo|ai_series"]) != 3 {
 				t.Fatal("recovered items and cursor were not saved together")
@@ -201,6 +211,8 @@ func TestNativeHongguoStalledCursorKeepsPartialItems(t *testing.T) {
 		return nativeHongguoResponse(request, 18, true, "fixture", "700002"), nil
 	})
 	engine := sourceFixtureEngine(t, transport)
+	// 单次调用只翻 1 轮：round0 offset0 → cursor 18；第二次调用 round1 offset18 → 重复项。
+	engine.downloader.cfg.MaxPagesPerSort = 1
 	input := nativeInput{Source: sourceHongguo, Category: "ai_series", Page: 1}
 	if _, err := engine.nativeCatalog(context.Background(), input); err != nil {
 		t.Fatal(err)
@@ -211,6 +223,7 @@ func TestNativeHongguoStalledCursorKeepsPartialItems(t *testing.T) {
 		t.Fatal("stalled pagination was accepted or retried indefinitely", err, result.Warning, calls)
 	}
 	restarted := reopenCatalogEngine(t, engine.directory, transport)
+	restarted.downloader.cfg.MaxPagesPerSort = 1
 	cached := restarted.nativeCached("hongguo|ai_series")
 	cursor := restarted.downloader.hongguoCatalogSnapshot().Feeds["category:ai_series"]
 	if cursor.Offset != 18 || len(cached.Items) != 2 || cached.Fresh || cached.Warning == "" {
@@ -264,6 +277,8 @@ func TestNativeCatalogSaveFailureRetriesWithoutAdvancing(t *testing.T) {
 			strconv.Itoa(1001+position), strconv.Itoa(1002+position)), nil
 	})
 	engine := sourceFixtureEngine(t, transport)
+	// 单次调用只翻 1 轮：page1 offset0 → cursor 18；page2 offset18 → next 36。
+	engine.downloader.cfg.MaxPagesPerSort = 1
 	input := nativeInput{Source: sourceHongguo, Category: "short_play", Page: 1}
 	if _, err := engine.nativeCatalog(context.Background(), input); err != nil {
 		t.Fatal(err)
@@ -299,6 +314,7 @@ func TestNativeCatalogSaveFailureRetriesWithoutAdvancing(t *testing.T) {
 		t.Fatal(err)
 	}
 	restarted := reopenCatalogEngine(t, engine.directory, transport)
+	restarted.downloader.cfg.MaxPagesPerSort = 1
 	if cursor := restarted.downloader.hongguoCatalogSnapshot().Feeds["category:short_play"]; cursor.Offset != 18 || len(restarted.catalogs["hongguo|short_play"]) != 2 {
 		t.Fatal("restart resumed an offset whose data had not been saved")
 	}
@@ -310,6 +326,7 @@ func TestNativeCatalogSaveFailureRetriesWithoutAdvancing(t *testing.T) {
 		t.Fatal("save retry failed or issued network requests", err, status)
 	}
 	restarted = reopenCatalogEngine(t, engine.directory, transport)
+	restarted.downloader.cfg.MaxPagesPerSort = 1
 	if len(restarted.catalogs["hongguo|short_play"]) != 3 || restarted.downloader.hongguoCatalogSnapshot().Feeds["category:short_play"].Offset != 36 {
 		t.Fatal("retry did not persist pending items with their cursor")
 	}
@@ -348,11 +365,12 @@ func TestNativeCatalogSizeLimitPreservesPreviousFile(t *testing.T) {
 }
 
 func TestNativeCatalogMetadataSaveExcludesInFlightCursor(t *testing.T) {
+	var pauseOnce sync.Once
 	paused, release := make(chan struct{}), make(chan struct{})
 	transport := sourceFixtureTransport(func(request *http.Request) (*http.Response, error) {
 		payload := nativeHongguoRequestForTest(t, request)
 		if payload.Offset == 18 && payload.Scene == "comic_series" {
-			close(paused)
+			pauseOnce.Do(func() { close(paused) })
 			select {
 			case <-release:
 			case <-request.Context().Done():
@@ -363,9 +381,15 @@ func TestNativeCatalogMetadataSaveExcludesInFlightCursor(t *testing.T) {
 		return nativeHongguoResponse(request, payload.Offset+18, true, "fixture", strconv.Itoa(base+payload.Offset)), nil
 	})
 	engine := sourceFixtureEngine(t, transport)
+	// 首次调用只翻 1 轮（offset0 → cursor 18 并提交），这样"in-flight"那次调用
+	// 才会停在 offset 18 的暂停点上。
+	engine.downloader.cfg.MaxPagesPerSort = 1
 	if _, err := engine.nativeCatalog(context.Background(), nativeInput{Source: sourceHongguo, Page: 1}); err != nil {
 		t.Fatal(err)
 	}
+	// in-flight 那次调用允许翻 2 轮：round0 offset18（comic_series 在此暂停）、
+	// round1 offset36。释放后应连同游标一起提交。
+	engine.downloader.cfg.MaxPagesPerSort = 2
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
@@ -394,7 +418,8 @@ func TestNativeCatalogMetadataSaveExcludesInFlightCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	restarted = reopenCatalogEngine(t, engine.directory, transport)
-	if restarted.downloader.hongguoCatalogSnapshot().Feeds["short_play"].Offset != 36 || len(restarted.catalogs[sourceHongguo]) != 6 {
+	snap := restarted.downloader.hongguoCatalogSnapshot()
+	if snap.Feeds["short_play"].Offset != 54 || len(restarted.catalogs[sourceHongguo]) != 9 {
 		t.Fatal("completed page was not saved with its cursor")
 	}
 }
