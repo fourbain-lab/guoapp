@@ -1758,12 +1758,6 @@ class _PlayerScreenState extends State<PlayerScreen>
             children: [
               if (widget.videoBuilder != null)
                 widget.videoBuilder!(layeredControls)
-              else if (_player is LunaExoPlayer)
-                LunaExoVideoView(
-                  player: _player,
-                  fit: BoxFit.contain,
-                  controls: (_) => layeredControls,
-                )
               else
                 Video(
                   controller: _video!,
