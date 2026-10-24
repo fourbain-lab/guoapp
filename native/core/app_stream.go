@@ -182,7 +182,9 @@ func (stream *nativeStreamServer) nativeOpen(media providerMedia) (string, strin
 	stream.sessions[token] = session
 	stream.mu.Unlock()
 	entry := nativeStreamAsset{address: media.URL, contentType: "video/mp4"}
-	if media.Playlist != "" || len(media.HLSKey) > 0 || nativeHLSManifest(media.URL) {
+	parsedURL, parseErr := url.Parse(media.URL)
+	isHLS := media.Playlist != "" || (parseErr == nil && strings.HasSuffix(strings.ToLower(parsedURL.Path), ".m3u8"))
+	if isHLS {
 		entry.contentType = "application/vnd.apple.mpegurl"
 	}
 	if media.Playlist != "" {
@@ -350,6 +352,29 @@ func nativeSkip(reader io.Reader, n int64) error {
 	return err
 }
 
+// nativeProbePlaylist 用一次 512 字节的 Range 请求判断上游是否为 HLS 播放列表。
+// 仅在 HEAD 请求且响应类型无法判定时使用（HEAD 没有响应体，无法直接嗅探）。
+func (stream *nativeStreamServer) nativeProbePlaylist(ctx context.Context, session *nativeStreamSession, address string) bool {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
+	if err != nil {
+		return false
+	}
+	request.Header.Set("User-Agent", userAgent)
+	request.Header.Set("Referer", session.referer)
+	request.Header.Set("Range", "bytes=0-511")
+	response, err := stream.nativeRequest(request)
+	if err != nil {
+		return false
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusPartialContent {
+		return false
+	}
+	peek, _ := io.ReadAll(io.LimitReader(response.Body, 512))
+	text := strings.TrimSpace(strings.TrimPrefix(string(peek), "\ufeff"))
+	return strings.HasPrefix(text, "#EXTM3U")
+}
+
 func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet && request.Method != http.MethodHead {
 		writer.WriteHeader(http.StatusMethodNotAllowed)
@@ -511,7 +536,12 @@ func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, reques
 			}
 		}
 	}
-	playlist := strings.Contains(asset.contentType, "mpegurl") || strings.Contains(contentType, "mpegurl") || nativeHLSManifest(finalURL.String()) || len(session.key) > 0
+	// contentIsMP4 阻止把 .m3u8 后缀但实际返回 MP4 的请求误判成播放列表。
+	// 注意：不能把 session.key（CENC 解密密钥）当播放列表判据 —— 红果的加密
+	// MP4（bytevc1 + cenc-aes-ctr）同样带 key，误判会让整条媒体链路走 HLS 分支而失败。
+	contentIsMP4 := strings.Contains(contentType, "video/mp4")
+	playlist := strings.Contains(asset.contentType, "mpegurl") || strings.Contains(contentType, "mpegurl") ||
+		(nativeHLSManifest(finalURL.String()) && !contentIsMP4)
 	reader := bufio.NewReader(response.Body)
 	if playlist {
 		rewriteRange = false
@@ -528,10 +558,19 @@ func (stream *nativeStreamServer) nativeServe(writer http.ResponseWriter, reques
 	if !playlist && request.Method == http.MethodGet && !nativeDefiniteMedia(contentType) {
 		peek, peekErr := reader.Peek(512)
 		prefix := strings.TrimSpace(strings.TrimPrefix(string(peek), "\ufeff"))
+		// HLS 规范要求文件以 #EXTM3U 开头，因此嗅探结果优先于 Content-Type：
+		// 既避免 CDN 把 MP4 误标成 mpegurl 时仍按播放列表读取，也兼容播放列表被标成 octet-stream。
 		if strings.HasPrefix(prefix, "#EXTM3U") {
 			playlist = true
 		} else if peekErr == nil {
 			playlist = false
+		}
+	}
+	// HEAD 请求没有响应体可嗅探，只能补一次 512 字节的 Range 探测。
+	if !playlist && request.Method == http.MethodHead &&
+		(contentType == "" || strings.Contains(contentType, "octet-stream") || strings.Contains(contentType, "text/plain")) {
+		if stream.nativeProbePlaylist(ctx, session, asset.address) {
+			playlist = true
 		}
 	}
 	if playlist && request.Method == http.MethodHead {
