@@ -162,7 +162,7 @@ func TestHongguoDanmakuCacheAndConcurrentRequests(t *testing.T) {
 	if _, err := d.hongguoDanmaku(context.Background(), danmakuTestSeries, danmakuTestVideo, 30000, 160000); err != nil || calls.Load() != 2 {
 		t.Fatal("next window reused the wrong cached page")
 	}
-	if _, err := d.hongguoAppRequest(context.Background(), http.MethodPost, "/novel/player/video_detail/v1/", nil, map[string]string{"series_id": danmakuTestSeries}); err != nil {
+	if _, err := d.hongguoAppRequest(context.Background(), http.MethodPost, "/novel/player/video_detail/v1/", nil, map[string]string{"series_id": danmakuTestSeries}, 0); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -47,7 +47,7 @@ func (downloader *Downloader) hongguoAppDetail(ctx context.Context, seriesID str
 	pending := &hongguoDetailCall{done: make(chan struct{})}
 	client.pending[seriesID] = pending
 	client.mu.Unlock()
-	result, err := downloader.hongguoAppRequest(ctx, http.MethodPost, "/novel/player/video_detail/v1/", nil, map[string]any{"series_id": seriesID})
+	result, err := downloader.hongguoAppRequest(ctx, http.MethodPost, "/novel/player/video_detail/v1/", nil, map[string]any{"series_id": seriesID}, 0)
 	var entry hongguoDetailEntry
 	if err == nil {
 		entry, err = parseHongguoAppDetail(result, seriesID)

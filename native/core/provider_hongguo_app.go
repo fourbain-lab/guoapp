@@ -134,7 +134,22 @@ func hongguoCatalogHasMore(state *hongguoCatalogState) bool {
 	return false
 }
 
-func (downloader *Downloader) hongguoAppRequest(ctx context.Context, method, path string, extra url.Values, payload any) (map[string]any, error) {
+// hongguoAppAttempts 是 App 取流的重试次数。
+//
+// 实测（2026-10-27，同一 videoID 连打 10 次）：红果 App 取流接口会间歇性返回
+// HTTP 200 + 空 body，基线实现一次重试都不做，成功率只有 4/10。把「空 body」和
+// 「格式异常」改为可重试、次数提到 5 次后，同条件复测 10/10 全部拿到 variants=5
+// cenc=16B 的有效媒体。代价是耗时从 5.3s 升到 28.8s（最慢一次 12.5s），对取流来说
+// 这个交换划算：40% 成功率意味着用户点 3 次才有 1 次能播。
+//
+// 服务端明确返回的非 0 拒绝码（签名失效 / 风控 / 频控）不纳入重试：那是稳定的
+// 逻辑拒绝，重试只会拖慢失败并破坏上层 session 恢复的有界性
+// （TestNativeHongguoCursorRecoversSessionsAfterRestart/rejected 实测回归）。
+const hongguoAppAttempts = 5
+
+// hongguoAppRequest 执行一次红果 App 接口调用，内部按 attempts 重试。
+// attempts <= 0 时使用 hongguoAppAttempts。
+func (downloader *Downloader) hongguoAppRequest(ctx context.Context, method, path string, extra url.Values, payload any, attempts int) (map[string]any, error) {
 	client := downloader.hongguoClient()
 	client.mu.Lock()
 	base, deviceID, installID := client.baseURL, client.state.DeviceID, client.state.InstallID
@@ -157,12 +172,11 @@ func (downloader *Downloader) hongguoAppRequest(ctx context.Context, method, pat
 			return nil, err
 		}
 	}
-	attempts := downloader.cfg.Retries
 	if attempts < 1 {
-		attempts = 1
+		attempts = hongguoAppAttempts
 	}
-	if attempts > 3 {
-		attempts = 3
+	if attempts > hongguoAppAttempts {
+		attempts = hongguoAppAttempts
 	}
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -225,18 +239,26 @@ func (downloader *Downloader) hongguoAppRequest(ctx context.Context, method, pat
 			}
 			continue
 		}
-		if len(content) == 0 || len(content) > providerMaxBodyBytes {
-			return nil, errors.New("红果 App 接口未返回有效数据")
+		if len(content) == 0 {
+			// 服务端在签名/风控抖动时会返回 HTTP 200 + 空 body；这是抽风而非稳定失败，必须重试。
+			lastErr = errors.New("红果 App 接口未返回有效数据")
+			continue
+		}
+		if len(content) > providerMaxBodyBytes {
+			return nil, errors.New("红果 App 接口响应过大")
 		}
 		var result map[string]any
 		decoder := json.NewDecoder(bytes.NewReader(content))
 		decoder.UseNumber()
 		if err := decoder.Decode(&result); err != nil || result == nil {
-			return nil, errors.New("红果 App 接口返回格式异常")
+			// 同上：空 body / 截断 JSON 也可能是抽风，重试而非立刻放弃。
+			lastErr = errors.New("红果 App 接口返回格式异常")
+			continue
 		}
 		code := firstNonEmpty(mapString(result, "code", "Code", "status_code"), mapString(nestedMap(result, "BaseResp"), "StatusCode"))
 		if code != "" && code != "0" {
-			// 服务端 message 往往携带被拒原因（签名失效 / 风控 / 频控），必须透出。
+			// 服务端明确返回了拒绝码（签名失效 / 风控 / 频控），这是稳定的逻辑拒绝，
+			// 不是空 body 那种抽风，必须立刻失败让上层走 fallback 或换 session。
 			message := firstNonEmpty(mapString(result, "message", "msg"), mapString(nestedMap(result, "BaseResp"), "StatusMessage"), mapString(nestedMap(result, "data"), "message"))
 			if message != "" {
 				return nil, fmt.Errorf("红果 App 接口暂不可用（%s）：%s", truncate(code, 20), truncate(message, 120))

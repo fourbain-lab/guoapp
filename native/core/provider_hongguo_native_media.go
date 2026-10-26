@@ -20,7 +20,7 @@ func (downloader *Downloader) resolveHongguoAppMedia(ctx context.Context, videoI
 		"video_id": videoID, "content_type": 1,
 		"biz_param": map[string]any{"need_all_video_definition": true, "video_platform": 3},
 	}
-	result, err := downloader.hongguoAppRequest(ctx, http.MethodPost, "/novel/player/video_model/v1/", nil, payload)
+	result, err := downloader.hongguoAppRequest(ctx, http.MethodPost, "/novel/player/video_model/v1/", nil, payload, 0)
 	if err != nil {
 		return providerMedia{}, err
 	}

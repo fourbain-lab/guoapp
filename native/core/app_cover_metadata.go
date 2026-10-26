@@ -21,7 +21,7 @@ func (d *Downloader) nativeCoverAddress(ctx context.Context, drama nativeDrama) 
 		if !hongguoNumericID.MatchString(id) {
 			return "", errors.New("无效的红果剧集 ID")
 		}
-		result, err := d.hongguoAppRequest(ctx, http.MethodPost, "/novel/player/video_detail/v1/", nil, map[string]any{"series_id": id})
+		result, err := d.hongguoAppRequest(ctx, http.MethodPost, "/novel/player/video_detail/v1/", nil, map[string]any{"series_id": id}, 0)
 		if err != nil {
 			return "", err
 		}

@@ -93,7 +93,7 @@ func (d *Downloader) hongguoDanmaku(ctx context.Context, seriesID, videoID strin
 		"comment_type": 20, "sort": 1, "count": 90, "cursor": "", "aid": 8662, "compliance_status": 0,
 		"business_param": map[string]any{"book_id": seriesID, "start_offset_time": start, "playlet_item_duration": duration, "need_danmaku_guide_type": []int{1, 3, 4, 2}},
 	}
-	result, err := d.hongguoAppRequest(ctx, http.MethodPost, "/novel/commentapi/comment/list/"+videoID+"/v1/", nil, body)
+	result, err := d.hongguoAppRequest(ctx, http.MethodPost, "/novel/commentapi/comment/list/"+videoID+"/v1/", nil, body, 0)
 	var page hongguoDanmakuPage
 	if err == nil {
 		page, err = parseHongguoDanmaku(result, videoID, start, duration)
