@@ -1037,11 +1037,14 @@ class _PlayerScreenState extends State<PlayerScreen>
         if (platform is NativePlayer) {
           if (Platform.isAndroid) {
             if (_television) {
-              // 2026-10-30：mediacodec → auto。明确指定 mediacodec 时
-              // MediaCodec 创建失败（如 hevc_mediacodec: Both surface and
-              // native_window are NULL）mpv 不会自动降级，只能黑屏。
-              // auto 允许 mpv 自己挑并在失败时回退软解。
-              await platform.setProperty('hwdec', 'auto');
+              // 2026-10-31：mediacodec-copy -> auto-safe。
+              // mediacodec-copy 是指定值，mpv 遇到 MediaCodec 创建失败
+              // （hevc_mediacodec: Both surface and native_window are NULL）
+              // 只会报错不会回退，导致黑屏。原注释「由 mpv 自动降级软解」不成立。
+              // auto-safe 是上游 Xanerix/guoapp（1.0.2+102）的默认值：
+              // 只在确认安全时才用硬解，否则直接软解，比 auto 更保守
+              // （auto 仍会先尝试硬解，HEVC surface 竞态机型上依旧会黑屏）。
+              await platform.setProperty('hwdec', 'auto-safe');
               await platform.setProperty('hwdec-codecs', 'all');
               await platform.setProperty('opengl-pbo', 'yes');
               await platform.setProperty('video-latency-hacks', 'yes');
@@ -1059,11 +1062,14 @@ class _PlayerScreenState extends State<PlayerScreen>
               // 方案 A：MediaCodec 硬解（解码后拷贝回 GPU），兼容性优于零拷贝直出，
               // 且保留 mpv 的亮度/色彩增强；个别机型不支持时由 mpv 自动降级软解。
               //
-              // 2026-10-30 修正：mediacodec-copy → auto。上面那句"由 mpv 自动降级"
-              // 其实不成立——mediacodec-copy 是指定值，mpv 遇到 MediaCodec
-              // surface 竞态（hevc_mediacodec: Both surface and native_window
-              // are NULL）只会报错，不会回退。改成 auto 才真的能降级。
-              await platform.setProperty('hwdec', 'auto');
+              // 2026-10-31 修正：auto -> auto-safe。
+              // 上一版把 mediacodec-copy 改成 auto，实测主银装机后仍黑屏 ——
+              // 因为 auto 仍会先尝试硬解，HEVC surface 竞态机型上 MediaCodec
+              // 照样起不来。auto-safe 是上游 Xanerix/guoapp（1.0.2+102）
+              // PlaybackSession._configure 的默认值：只在确认安全时才用硬解，
+              // 否则直接软解。红果的 bytevc2 实测就是 HEVC 重封装（样本 hvc1），
+              // 走软解反而稳。
+              await platform.setProperty('hwdec', 'auto-safe');
               await platform.setProperty('hwdec-codecs', 'all');
               await platform.setProperty('vd-lavc-skiploopfilter', 'nonkey');
               await platform.setProperty('vd-lavc-threads', '4');
