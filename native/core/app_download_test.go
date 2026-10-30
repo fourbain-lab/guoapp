@@ -127,8 +127,49 @@ func TestNativeDownloadRangeResumeAndAddressIsolation(t *testing.T) {
 		ranges = append(ranges, r.Header.Get("Range"))
 		validators = append(validators, r.Header.Get("If-Range"))
 		mu.Unlock()
-		w.Header().Set("ETag", "\"v1\"")
-		http.ServeContent(w, r, "media.mp4", time.Time{}, bytes.NewReader(data))
+		w.Header().Set("ETag", `"v1"`)
+		w.Header().Set("Accept-Ranges", "bytes")
+
+		// 这里原来是 http.ServeContent(w, r, "media.mp4", time.Time{}, bytes.NewReader(data))。
+		// 问题在于数据全在本地内存里，1MB 几毫秒就传完：下面那个进度回调里的
+		// cancel() 常常在 io.Copy 已经把整份文件写完、甚至 rename 之后才生效，
+		// .part 于是残留全量数据，第 147 行「断点必须小于总量」的断言随机失败
+		// （实测单独跑 20 次挂 1 次，混在全量里更频繁）。
+		// 改成手动分段写 + 每段 Flush 后让出，把下载拉长到取消点确定为止。
+		start, end, partial := 0, len(data)-1, false
+		validator := r.Header.Get("If-Range")
+		if spec := r.Header.Get("Range"); spec != "" && (validator == "" || validator == `"v1"`) {
+			if from, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(spec, "bytes="), "-"), 10, 64); err == nil && from >= 0 && from < int64(len(data)) {
+				start, end, partial = int(from), len(data)-1, true
+			}
+		}
+		if partial {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
+			w.Header().Set("Content-Length", strconv.Itoa(end-start+1))
+			w.WriteHeader(http.StatusPartialContent)
+		} else {
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+			w.WriteHeader(http.StatusOK)
+		}
+		// 16KB 一段、每段 Flush 后短暂让出：进度回调的 cancel() 一定能落在
+		// 某个中间点上，.part 也就一定有 0 < size < len(data)。
+		for pos := start; pos <= end; pos += 16384 {
+			stop := pos + 16384
+			if stop > end+1 {
+				stop = end + 1
+			}
+			if _, err := w.Write(data[pos:stop]); err != nil {
+				return
+			}
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(time.Millisecond):
+			}
+		}
 	}))
 	t.Cleanup(upstream.Close)
 	manager := downloadTestManager(t)

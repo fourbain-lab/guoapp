@@ -465,17 +465,28 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   /// 硬件解码自愈：部分机型 mediacodec 初始化成功但解不出画面（黑屏/花屏，
   /// 声音正常）。播放 8 秒后若时间在走但仍无视频尺寸，切回软件解码并回到原位。
+  ///
+  /// 2026-10-30 修复：旧判断只看 `state.width/height`，但这两个值是 demuxer
+  /// 从容器元数据读到的分辨率，MediaCodec surface 竞态时**同样会有值**，
+  /// 于是 `> 0` 直接 return，自愈从未触发。现在加一层播放进度交叉验证：
+  /// 8 秒内 position 没有推进，才算真的卡住。
   void _watchHardwareDecode() {
     _hardwareDecodeWatch?.cancel();
-    if (!Platform.isAndroid || _television) return;
+    if (!Platform.isAndroid) return;
+    final mark = _player.state.position;
     _hardwareDecodeWatch = Timer(const Duration(seconds: 8), () async {
       if (_closed || !_foreground) return;
       final state = _player.state;
       if (!state.playing || state.position <= Duration.zero) return;
-      if ((state.width ?? 0) > 0 && (state.height ?? 0) > 0) return;
+      if ((state.width ?? 0) > 0 && (state.height ?? 0) > 0) {
+        // 宽高有值只说明 demuxer 认识这个流，不等于画面真的出来了。
+        if (state.position > mark) return;
+      }
       final platform = _player.platform;
       if (platform is! NativePlayer) return;
-      DiaryService.add('[Play] 硬解 8 秒无画面，回退软件解码');
+      DiaryService.add(
+        '[Play] 硬解 8 秒无画面（position ${state.position} / mark $mark），回退软件解码',
+      );
       try {
         await platform.setProperty('hwdec', 'no');
         await _player.seek(state.position);
@@ -1026,7 +1037,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         if (platform is NativePlayer) {
           if (Platform.isAndroid) {
             if (_television) {
-              await platform.setProperty('hwdec', 'mediacodec');
+              // 2026-10-30：mediacodec → auto。明确指定 mediacodec 时
+              // MediaCodec 创建失败（如 hevc_mediacodec: Both surface and
+              // native_window are NULL）mpv 不会自动降级，只能黑屏。
+              // auto 允许 mpv 自己挑并在失败时回退软解。
+              await platform.setProperty('hwdec', 'auto');
               await platform.setProperty('hwdec-codecs', 'all');
               await platform.setProperty('opengl-pbo', 'yes');
               await platform.setProperty('video-latency-hacks', 'yes');
@@ -1043,7 +1058,12 @@ class _PlayerScreenState extends State<PlayerScreen>
             } else {
               // 方案 A：MediaCodec 硬解（解码后拷贝回 GPU），兼容性优于零拷贝直出，
               // 且保留 mpv 的亮度/色彩增强；个别机型不支持时由 mpv 自动降级软解。
-              await platform.setProperty('hwdec', 'mediacodec-copy');
+              //
+              // 2026-10-30 修正：mediacodec-copy → auto。上面那句"由 mpv 自动降级"
+              // 其实不成立——mediacodec-copy 是指定值，mpv 遇到 MediaCodec
+              // surface 竞态（hevc_mediacodec: Both surface and native_window
+              // are NULL）只会报错，不会回退。改成 auto 才真的能降级。
+              await platform.setProperty('hwdec', 'auto');
               await platform.setProperty('hwdec-codecs', 'all');
               await platform.setProperty('vd-lavc-skiploopfilter', 'nonkey');
               await platform.setProperty('vd-lavc-threads', '4');

@@ -140,6 +140,10 @@ func (d *Downloader) fetchHongguoChapters(ctx context.Context, sourceID string) 
 	if ctx.Err() != nil {
 		return "", nil, ctx.Err()
 	}
+	// 注意：这里【不要】加 album_detail 兜底。/novel/player/album_detail/v1/
+	// 只返回剧集元信息（title/cover/intro/play_cnt），不返回分集列表
+	// （2026-10-30 实测真实响应确认无 video_list/episode 数组），
+	// 拿它兜底只会白白多一次请求然后失败。见 provider_hongguo_album_detail.go。
 	title, chapters, webErr := d.fetchHongguoWebChapters(ctx, sourceID)
 	if webErr == nil {
 		return title, chapters, nil
@@ -198,6 +202,21 @@ func (d *Downloader) resolveHongguoMedia(ctx context.Context, task Task) (provid
 	if !hongguoNumericID.MatchString(videoID) || !hongguoNumericID.MatchString(seriesID) {
 		return providerMedia{}, fmt.Errorf("红果章节 ID 无效，请重新获取章节")
 	}
+	// ⚠ 2026-10-30 实测后决定【不】把公开直链排在这里。
+	//
+	// 曾以为 /video/public/{videoID}/360p.mp4 能救场，实测覆盖率只有 8%
+	// （三个剧集各均匀抽 12 集，均 1/12）：只有每部剧前几集免费试看有公开版本，
+	// 收费集全部 404。而 variants 实测 5 个全是 bytevc2/bytevc1
+	// （video_platform 0/1/2/3/4 都试过，无 H.264），我下载到的 hvc1 说明
+	// bytevc2 实际就是 HEVC 重编码。
+	//
+	// 排在这里的后果：92% 的集会白发一次探活请求（多 1-2s）然后失败，
+	// 反而拖慢播放。故移除，只保留代码与实测记录备查。
+	//
+	// 真正的病根在渲染层：Android MediaCodec 解 HEVC 时的 surface 竞态
+	// （hevc_mediacodec: Both surface and native_window are NULL），
+	// 那在 Flutter/media_kit 层，Go 侧换 so 换不掉。
+	//
 	// v10 fix: 先 web 后 app。Android ExoPlayer (Media3) 用 MediaCodec 解码，
 	// App API 返回的 variant 全是字节私有 codec (bytevc1/bytevc2) 不能解。
 	// Web player 返回的是标准 h264 MP4，MediaCodec 100% 能解。
@@ -346,7 +365,6 @@ func anyList(v any) []any {
 	}
 	return nil
 }
-
 
 // refreshHongguoMediaURL v3 fix: 红果 CDN URL 30 min 签名过期，
 // 重新走 playback API 拿新 URL。复用 resolveHongguoPlaybackAPI。
