@@ -41,11 +41,6 @@
         <service android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
             android:foregroundServiceType="dataSync" android:exported="false" android:stopWithTask="false"/>
         <meta-data android:name="flutterEmbedding" android:value="2"/>
-        <!-- 2026-10-31：强制关闭 Impeller，回退 Skia 渲染。
-             Flutter 的 Impeller 引擎 + media_kit(mpv) 的硬解 texture 在部分机型上
-             直接黑屏（无画面、无报错，position 正常推进）。上游 Xanerix/guoapp 在
-             9d7d29b 专门加了「兼容渲染模式」开关（MainActivity 传 --enable-impeller=false），
-             正是为了绕开这个坑；本 fork 缺该功能，故在 Manifest 层直接关死。 -->
         <meta-data android:name="io.flutter.embedding.android.EnableImpeller" android:value="false"/>
     </application>
     <queries>
